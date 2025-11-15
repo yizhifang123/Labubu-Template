@@ -10,18 +10,12 @@
  * things beginner friendly.
  */
 
-struct Pose {
-  double x = 0.0;       ///< inches
-  double y = 0.0;       ///< inches
-  double heading = 0.0; ///< degrees (0 == facing up-field)
-};
-
 extern std::atomic<bool> headingCorrectionEnabled;
-extern Pose robotPose;
 extern bool is_turning;
 extern double correct_angle;
 extern double xpos;
 extern double ypos;
+extern double heading;
 
 void initializeMotion();
 
@@ -48,6 +42,6 @@ void turnToPoint(double x, double y, int dir, double time_limit_msec);
 void moveToPoint(double x, double y, int dir, double time_limit_msec, bool exit = true, double max_output = 12, bool overturn = false);
 void boomerang(double x, double y, int dir, double a, double dlead, double time_limit_msec, bool exit = true, double max_output = 12, bool overturn = false);
 
-Pose getPose();
-void setPose(const Pose& pose);
+void getPose(double& x, double& y, double& heading);
+void setPose(double x, double y, double heading);
 

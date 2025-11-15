@@ -1,4 +1,5 @@
 #include "pid.h"
+#include "utils.h"
 #include <algorithm>
 #include <cmath>
 
@@ -63,7 +64,7 @@ double PID::step(double measurement, double dtSeconds) {
   }
 
   m_output = m_kp * m_error + m_ki * m_integral + m_kd * m_derivative;
-  m_output = std::clamp(m_output, m_minOutput, m_maxOutput);
+  m_output = clamp(m_output, m_minOutput, m_maxOutput);
 
   if (std::fabs(m_error) < m_errorTolerance &&
       std::fabs(m_derivative) < m_derivativeTolerance) {

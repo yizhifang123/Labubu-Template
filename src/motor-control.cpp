@@ -11,11 +11,11 @@
 using namespace vex;
 
 std::atomic<bool> headingCorrectionEnabled{false};
-Pose robotPose{};
 bool is_turning = false;
 double correct_angle = 0.0;
 double xpos = 0.0;
 double ypos = 0.0;
+double heading = 0.0;
 
 namespace {
 
@@ -79,28 +79,22 @@ double computeDt(timer& t) {
 void updatePoseFromArc(double deltaForward, double deltaHeadingRad) {
   if (std::fabs(deltaHeadingRad) < 1e-6) {
     // Straight line
-    xpos += deltaForward * std::sin(degToRad(robotPose.heading));
-    ypos += deltaForward * std::cos(degToRad(robotPose.heading));
+    xpos += deltaForward * std::sin(degToRad(heading));
+    ypos += deltaForward * std::cos(degToRad(heading));
   } else {
-    const double headingRad = degToRad(robotPose.heading);
+    const double headingRad = degToRad(heading);
     const double radius = deltaForward / deltaHeadingRad;
     const double midHeading = headingRad + deltaHeadingRad / 2.0;
 
     xpos += radius * (std::sin(midHeading + deltaHeadingRad / 2.0) - std::sin(midHeading - deltaHeadingRad / 2.0));
     ypos += radius * (std::cos(midHeading - deltaHeadingRad / 2.0) - std::cos(midHeading + deltaHeadingRad / 2.0));
   }
-  robotPose.x = xpos;
-  robotPose.y = ypos;
-  robotPose.heading = wrapAngleDeg(robotPose.heading + radToDeg(deltaHeadingRad));
+  heading = wrapAngleDeg(heading + radToDeg(deltaHeadingRad));
 }
 
 template <typename Function>
 void startThread(Function&& fn) {
-  static bool started = false;
-  if (!started) {
-    started = true;
-    thread(fn);
-  }
+  (void)thread(fn);
 }
 
 }  // namespace
@@ -118,7 +112,7 @@ void initializeMotion() {
   xpos = 0.0;
   ypos = 0.0;
   correct_angle = getInertialHeading();
-  robotPose = {xpos, ypos, correct_angle};
+  heading = correct_angle;
 
   if (trackingOptions.enableHeadingHold) {
     headingCorrectionEnabled = true;
@@ -190,8 +184,8 @@ void stopChassis(brakeType type) {
 }
 
 void resetChassis() {
-  left_chassis.resetRotation();
-  right_chassis.resetRotation();
+  left_chassis.resetPosition();
+  right_chassis.resetPosition();
 }
 
 double getLeftRotationDegree() {
@@ -318,7 +312,6 @@ void curveCircle(double result_angle_deg, double center_radius, double time_limi
     const double rightDistance = std::fabs(motorDegreesToInches(getRightRotationDegree()));
 
     const double outerTravel = turningLeft ? rightDistance : leftDistance;
-    const double innerTravel = turningLeft ? leftDistance : rightDistance;
 
     double outerCommand = outerPid.step(outerTravel, dt) * driveDirection;
     double innerCommand = outerCommand * ratio;
@@ -444,7 +437,7 @@ void trackNoOdomWheel() {
     const double deltaForward = (deltaLeft + deltaRight) / 2.0;
     const double deltaHeading = currentHeading - prevHeading;
 
-    robotPose.heading = wrapAngleDeg(radToDeg(currentHeading));
+    heading = wrapAngleDeg(radToDeg(currentHeading));
     updatePoseFromArc(deltaForward, deltaHeading);
 
     prevLeft = currentLeft;
@@ -461,11 +454,11 @@ void trackXYOdomWheel() {
   double prevVertical = VerticalTracker.position(degrees);
 
   while (true) {
-    const double heading = degToRad(getInertialHeading());
+    const double headingRad = degToRad(getInertialHeading());
     const double horizontal = HorizontalTracker.position(degrees);
     const double vertical = VerticalTracker.position(degrees);
 
-    const double deltaHeading = heading - prevHeading;
+    const double deltaHeading = headingRad - prevHeading;
     const double deltaHorizontal = trackerDegreesToInches(horizontal - prevHorizontal, drivetrainDimensions.horizontalTrackerDiameterIn);
     const double deltaVertical = trackerDegreesToInches(vertical - prevVertical, drivetrainDimensions.verticalTrackerDiameterIn);
 
@@ -484,9 +477,9 @@ void trackXYOdomWheel() {
     const double averageHeading = prevHeading + deltaHeading / 2.0;
     xpos += deltaYLocal * std::sin(averageHeading) + deltaXLocal * std::cos(averageHeading);
     ypos += deltaYLocal * std::cos(averageHeading) - deltaXLocal * std::sin(averageHeading);
-    robotPose = {xpos, ypos, wrapAngleDeg(radToDeg(heading))};
+    heading = wrapAngleDeg(radToDeg(headingRad));
 
-    prevHeading = heading;
+    prevHeading = headingRad;
     prevHorizontal = horizontal;
     prevVertical = vertical;
 
@@ -501,12 +494,12 @@ void trackXOdomWheel() {
   double prevRight = getRightRotationDegree();
 
   while (true) {
-    const double heading = degToRad(getInertialHeading());
+    const double headingRad = degToRad(getInertialHeading());
     const double horizontal = HorizontalTracker.position(degrees);
     const double left = getLeftRotationDegree();
     const double right = getRightRotationDegree();
 
-    const double deltaHeading = heading - prevHeading;
+    const double deltaHeading = headingRad - prevHeading;
     const double deltaHorizontal = trackerDegreesToInches(horizontal - prevHorizontal, drivetrainDimensions.horizontalTrackerDiameterIn);
     const double deltaForward = (motorDegreesToInches(left - prevLeft) + motorDegreesToInches(right - prevRight)) / 2.0;
 
@@ -525,9 +518,9 @@ void trackXOdomWheel() {
     const double averageHeading = prevHeading + deltaHeading / 2.0;
     xpos += deltaYLocal * std::sin(averageHeading) + deltaXLocal * std::cos(averageHeading);
     ypos += deltaYLocal * std::cos(averageHeading) - deltaXLocal * std::sin(averageHeading);
-    robotPose = {xpos, ypos, wrapAngleDeg(radToDeg(heading))};
+    heading = wrapAngleDeg(radToDeg(headingRad));
 
-    prevHeading = heading;
+    prevHeading = headingRad;
     prevHorizontal = horizontal;
     prevLeft = left;
     prevRight = right;
@@ -541,10 +534,10 @@ void trackYOdomWheel() {
   double prevVertical = VerticalTracker.position(degrees);
 
   while (true) {
-    const double heading = degToRad(getInertialHeading());
+    const double headingRad = degToRad(getInertialHeading());
     const double vertical = VerticalTracker.position(degrees);
 
-    const double deltaHeading = heading - prevHeading;
+    const double deltaHeading = headingRad - prevHeading;
     const double deltaVertical = trackerDegreesToInches(vertical - prevVertical, drivetrainDimensions.verticalTrackerDiameterIn);
 
     double deltaYLocal;
@@ -558,9 +551,9 @@ void trackYOdomWheel() {
     const double averageHeading = prevHeading + deltaHeading / 2.0;
     xpos += deltaYLocal * std::sin(averageHeading);
     ypos += deltaYLocal * std::cos(averageHeading);
-    robotPose = {xpos, ypos, wrapAngleDeg(radToDeg(heading))};
+    heading = wrapAngleDeg(radToDeg(headingRad));
 
-    prevHeading = heading;
+    prevHeading = headingRad;
     prevVertical = vertical;
 
     wait(10, msec);
@@ -732,15 +725,17 @@ void boomerang(double x, double y, int dir, double a, double dlead, double time_
   is_turning = false;
 }
 
-Pose getPose() {
-  return robotPose;
+void getPose(double& x, double& y, double& heading_out) {
+  x = xpos;
+  y = ypos;
+  heading_out = heading;
 }
 
-void setPose(const Pose& pose) {
-  robotPose = pose;
-  xpos = pose.x;
-  ypos = pose.y;
-  correct_angle = wrapAngleDeg(pose.heading);
+void setPose(double x, double y, double heading_in) {
+  xpos = x;
+  ypos = y;
+  heading = wrapAngleDeg(heading_in);
+  correct_angle = heading;
   InertialSensor.setHeading(correct_angle, degrees);
   HorizontalTracker.resetPosition();
   VerticalTracker.resetPosition();

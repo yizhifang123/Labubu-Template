@@ -66,11 +66,11 @@ void configureDevices() {
     wait(20, msec);
   }
 
-  Brain.Screen.nextRow();
+  Brain.Screen.setCursor(2, 1);
   Brain.Screen.print("Configuring drive...");
   configureDriveMotors();
 
-  Brain.Screen.nextRow();
+  Brain.Screen.setCursor(3, 1);
   Brain.Screen.print("Resetting trackers...");
   HorizontalTracker.resetPosition();
   VerticalTracker.resetPosition();
@@ -80,7 +80,7 @@ void configureDevices() {
   trackingOptions.useHorizontalTracker = false;
   trackingOptions.useVerticalTracker = false;
 
-  Brain.Screen.nextRow();
+  Brain.Screen.setCursor(4, 1);
   Brain.Screen.print("Robot ready. Adjust tuning in robot-config.h");
 }
 

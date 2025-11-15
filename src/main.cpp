@@ -15,7 +15,7 @@ void runPreAutonomous() {
 
   // Set an initial pose.  Change these numbers after placing the robot on
   // the field so autonomous starts from the correct location.
-  setPose({0.0, 0.0, getInertialHeading()});
+  setPose(0.0, 0.0, getInertialHeading());
 }
 
 /**
@@ -55,6 +55,11 @@ void runDriver() {
     // Basic deadband to avoid drift when sticks rest near 0.
     if (std::fabs(forward) < 5.0) forward = 0.0;
     if (std::fabs(turn) < 5.0) turn = 0.0;
+
+    // Scale turning so small stick inputs are 40% softer while full deflection stays 100%.
+    const double turnMagnitude = std::fabs(turn);
+    const double turnScale = 0.6 + 0.4 * (turnMagnitude / 100.0);
+    turn *= turnScale;
 
     // Mix forward and turn into left/right volt outputs.
     const double leftVoltage = clamp((forward + turn) * 0.12, -12.0, 12.0);
