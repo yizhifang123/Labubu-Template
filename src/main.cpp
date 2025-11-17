@@ -23,16 +23,12 @@ void runPreAutonomous() {
  * helpers work together.  Replace these commands with your own routine.
  */
 void runAutonomous() {
-  headingCorrectionEnabled = trackingOptions.enableHeadingHold;
-
   // Drive forward 24 inches while holding the current heading.
-  driveTo(24.0, 3000);
+  driveTo(24.0, 1000);
 
   // Swing turn to face the goal.
   swing(correct_angle + 45.0, 1, 2000);
 
-  // Move to an arbitrary point on the field.
-  moveToPoint(36.0, 12.0, 1, 3500);
 
   // Finish with a tight turn toward the alliance stake.
   turnToPoint(48.0, 0.0, 1, 1500);
@@ -43,9 +39,8 @@ void runAutonomous() {
  * but you can adjust the mix to your preferences.
  */
 void runDriver() {
-  headingCorrectionEnabled = false;
-
   while (true) {
+
     // Split-arcade drive:
     // - Left stick vertical (Axis3) controls forward/backward speed
     // - Right stick horizontal (Axis1) controls turning
@@ -57,13 +52,13 @@ void runDriver() {
     if (std::fabs(turn) < 5.0) turn = 0.0;
 
     // Scale turning so small stick inputs are 40% softer while full deflection stays 100%.
-    const double turnMagnitude = std::fabs(turn);
-    const double turnScale = 0.6 + 0.4 * (turnMagnitude / 100.0);
-    turn *= turnScale;
+    // const double turnMagnitude = std::fabs(turn);
+    // const double turnScale = 0.6 + 0.4 * (turnMagnitude / 100.0);
+    // turn *= turnScale;
 
     // Mix forward and turn into left/right volt outputs.
-    const double leftVoltage = clamp((forward + turn) * 0.12, -12.0, 12.0);
-    const double rightVoltage = clamp((forward - turn) * 0.12, -12.0, 12.0);
+    const double leftVoltage = (forward + turn) * 0.12;
+    const double rightVoltage = (forward - turn) * 0.12;
     driveChassis(leftVoltage, rightVoltage);
 
     wait(20, msec);

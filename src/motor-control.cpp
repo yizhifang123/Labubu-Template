@@ -10,12 +10,15 @@
 
 using namespace vex;
 
-std::atomic<bool> headingCorrectionEnabled{false};
-bool is_turning = false;
+std::atomic<bool> is_turning{false};
 double correct_angle = 0.0;
 double xpos = 0.0;
 double ypos = 0.0;
 double heading = 0.0;
+
+// RW-Template global variables for motion chaining
+double prev_left_output = 0.0;
+double prev_right_output = 0.0;
 
 namespace {
 
@@ -62,12 +65,8 @@ class SlewRateLimiter {
 void setDriveVoltage(double left, double right) {
   left = clamp(left, -motionLimits.maxVoltage, motionLimits.maxVoltage);
   right = clamp(right, -motionLimits.maxVoltage, motionLimits.maxVoltage);
-  left_chassis.spin(fwd, left, voltageUnits::volt);
-  right_chassis.spin(fwd, right, voltageUnits::volt);
-}
-
-void maintainHeadingTarget(double target) {
-  correct_angle = wrapAngleDeg(target);
+  left_chassis.spin(vex::directionType::fwd, left, vex::voltageUnits::volt);
+  right_chassis.spin(vex::directionType::fwd, right, vex::voltageUnits::volt);
 }
 
 double computeDt(timer& t) {
@@ -97,7 +96,44 @@ void startThread(Function&& fn) {
   (void)thread(fn);
 }
 
+// Helper functions matching RW-Template implementation
+void scaleToMin(double& left_output, double& right_output, double min_output) {
+  if (std::fabs(left_output) <= std::fabs(right_output) && left_output < min_output && left_output > 0) {
+    right_output = right_output / left_output * min_output;
+    left_output = min_output;
+  } else if (std::fabs(right_output) < std::fabs(left_output) && right_output < min_output && right_output > 0) {
+    left_output = left_output / right_output * min_output;
+    right_output = min_output;
+  } else if (std::fabs(left_output) <= std::fabs(right_output) && left_output > -min_output && left_output < 0) {
+    right_output = right_output / left_output * -min_output;
+    left_output = -min_output;
+  } else if (std::fabs(right_output) < std::fabs(left_output) && right_output > -min_output && right_output < 0) {
+    left_output = left_output / right_output * -min_output;
+    right_output = -min_output;
+  }
+}
+
+void scaleToMax(double& left_output, double& right_output, double max_output) {
+  if (std::fabs(left_output) >= std::fabs(right_output) && left_output > max_output) {
+    right_output = right_output / left_output * max_output;
+    left_output = max_output;
+  } else if (std::fabs(right_output) > std::fabs(left_output) && right_output > max_output) {
+    left_output = left_output / right_output * max_output;
+    right_output = max_output;
+  } else if (std::fabs(left_output) > std::fabs(right_output) && left_output < -max_output) {
+    right_output = right_output / left_output * -max_output;
+    left_output = -max_output;
+  } else if (std::fabs(right_output) > std::fabs(left_output) && right_output < -max_output) {
+    left_output = left_output / right_output * -max_output;
+    right_output = -max_output;
+  }
+}
+
 }  // namespace
+
+void maintainHeadingTarget(double target) {
+  correct_angle = wrapAngleDeg(target);
+}
 
 void initializeMotion() {
   static bool initialized = false;
@@ -113,11 +149,6 @@ void initializeMotion() {
   ypos = 0.0;
   correct_angle = getInertialHeading();
   heading = correct_angle;
-
-  if (trackingOptions.enableHeadingHold) {
-    headingCorrectionEnabled = true;
-    startThread([] { correctHeading(); });
-  }
 
   if (trackingOptions.useHorizontalTracker && trackingOptions.useVerticalTracker) {
     startThread([] { trackXYOdomWheel(); });
@@ -139,43 +170,96 @@ double getInertialHeading() {
 }
 
 double normalizeTarget(double angle) {
-  const double current = getInertialHeading();
-  const double wrapped = wrapAngleDeg(angle - current);
-  return wrapAngleDeg(current + wrapped);
+  // RW-Template implementation using while loops
+  if (angle - getInertialHeading() > 180) {
+    while (angle - getInertialHeading() > 180) angle -= 360;
+  } else if (angle - getInertialHeading() < -180) {
+    while (angle - getInertialHeading() < -180) angle += 360;
+  }
+  return angle;
 }
 
 void turnToAngle(double turn_angle, double time_limit_msec, bool exit, double max_output) {
-  timer total;
-  timer sample;
+  // RW-Template implementation
+  stopChassis(vex::brakeType::coast);
+  is_turning.store(true, std::memory_order_seq_cst);
+  double threshold = 1;
+  PID pid(motionGains.turnKp, motionGains.turnKi, motionGains.turnKd);
 
+  // Normalize and set PID target
   turn_angle = normalizeTarget(turn_angle);
-  PID turnPid(motionGains.turnKp, motionGains.turnKi, motionGains.turnKd);
-  turnPid.setTarget(turn_angle);
-  turnPid.setOutputLimits(-max_output, max_output);
-  turnPid.setIntegralLimit(4.0);
-  turnPid.setTolerance(1.0, 5.0, 150);
+  pid.setTarget(turn_angle);
+  pid.setOutputLimits(-max_output, max_output);
+  pid.setIntegralLimit(0);  // setIntegralMax(0) in RW-Template
+  pid.setTolerance(threshold, threshold * 4.5, 250);  // Combined tolerance setup
 
-  is_turning = true;
+  // Draw baseline for visualization (RW-Template style)
+  double draw_amplifier = 230 / std::fabs(turn_angle);
+  Brain.Screen.clearScreen(black);
+  Brain.Screen.setPenColor(green);
+  Brain.Screen.drawLine(0, std::fabs(turn_angle) * draw_amplifier, 600, std::fabs(turn_angle) * draw_amplifier);
+  Brain.Screen.setPenColor(red);
 
-  while (total.time(msec) <= time_limit_msec && !turnPid.isSettled()) {
-    const double dt = computeDt(sample);
-    const double heading = getInertialHeading();
-    double output = turnPid.step(heading, dt);
-
-    if (std::fabs(output) < motionLimits.minVoltage) {
-      output = std::copysign(motionLimits.minVoltage, output);
+  // PID loop for turning
+  double start_time = Brain.timer(msec);
+  timer sample;
+  double output;
+  double current_heading = getInertialHeading();
+  double previous_heading = 0;
+  int index = 1;
+  
+  if(exit == false && correct_angle < turn_angle) {
+    // Turn right without stopping at end
+    while (getInertialHeading() < turn_angle && Brain.timer(msec) - start_time <= time_limit_msec) {
+      current_heading = getInertialHeading();
+      double dt = computeDt(sample);
+      output = pid.step(current_heading, dt);
+      // Draw heading trace
+      Brain.Screen.drawLine(index * 3, std::fabs(previous_heading) * draw_amplifier, (index + 1) * 3, std::fabs(current_heading * draw_amplifier));
+      index++;
+      previous_heading = current_heading;
+      // Clamp output
+      if(output < motionLimits.minVoltage) output = motionLimits.minVoltage;
+      if(output > max_output) output = max_output;
+      else if(output < -max_output) output = -max_output;
+      driveChassis(output, -output);
+      wait(10, msec);
     }
-
-    setDriveVoltage(output, -output);
-    wait(10, msec);
+  } else if(exit == false && correct_angle > turn_angle) {
+    // Turn left without stopping at end
+    while (getInertialHeading() > turn_angle && Brain.timer(msec) - start_time <= time_limit_msec) {
+      current_heading = getInertialHeading();
+      double dt = computeDt(sample);
+      output = pid.step(current_heading, dt);
+      Brain.Screen.drawLine(index * 3, std::fabs(previous_heading) * draw_amplifier, (index + 1) * 3, std::fabs(current_heading * draw_amplifier));
+      index++;
+      previous_heading = current_heading;
+      if(output < motionLimits.minVoltage) output = motionLimits.minVoltage;
+      if(output > max_output) output = max_output;
+      else if(output < -max_output) output = -max_output;
+      driveChassis(-output, output);
+      wait(10, msec);
+    }
+  } else {
+    // Standard PID turn
+    while (!pid.isSettled() && Brain.timer(msec) - start_time <= time_limit_msec) {
+      current_heading = getInertialHeading();
+      double dt = computeDt(sample);
+      output = pid.step(current_heading, dt);
+      Brain.Screen.drawLine(index * 3, std::fabs(previous_heading) * draw_amplifier, (index + 1) * 3, std::fabs(current_heading * draw_amplifier));
+      index++;
+      previous_heading = current_heading;
+      if(output > max_output) output = max_output;
+      else if(output < -max_output) output = -max_output;
+      driveChassis(output, -output);
+      wait(10, msec);
+    }
   }
-
-  if (exit) {
-    stopChassis(brakeType::hold);
+  if(exit) {
+    stopChassis(vex::brakeType::hold);
   }
-
-  maintainHeadingTarget(turn_angle);
-  is_turning = false;
+  correct_angle = turn_angle;
+  is_turning.store(false, std::memory_order_seq_cst);
 }
 
 void stopChassis(brakeType type) {
@@ -184,8 +268,9 @@ void stopChassis(brakeType type) {
 }
 
 void resetChassis() {
-  left_chassis.resetPosition();
-  right_chassis.resetPosition();
+  // RW-Template uses setPosition instead of resetPosition
+  left_chassis.setPosition(0, degrees);
+  right_chassis.setPosition(0, degrees);
 }
 
 double getLeftRotationDegree() {
@@ -197,229 +282,405 @@ double getRightRotationDegree() {
 }
 
 void driveTo(double distance_in, double time_limit_msec, bool exit, double max_output) {
-  timer total;
+  // RW-Template implementation
+  double start_left = getLeftRotationDegree(), start_right = getRightRotationDegree();
+  stopChassis(vex::brakeType::coast);
+  is_turning.store(true, std::memory_order_seq_cst);
+  double threshold = 0.5;
+  int drive_direction = distance_in > 0 ? 1 : -1;
+  double max_slew_fwd = drive_direction > 0 ? motionLimits.slewStepForward : motionLimits.slewStepReverse;
+  double max_slew_rev = drive_direction > 0 ? motionLimits.slewStepReverse : motionLimits.slewStepForward;
+  bool min_speed = false;
+  
+  // Simplified chaining logic (RW-Template has dir_change_start/end variables we don't have)
+  if(!exit) {
+    // For chaining without direction change variables, use default behavior
+    max_slew_fwd = 24;  // Large slew for smooth chaining
+    max_slew_rev = 24;
+    min_speed = true;
+  }
+
+  distance_in = distance_in * drive_direction;
+  PID pid_distance(motionGains.driveKp, motionGains.driveKi, motionGains.driveKd);
+
+  // Configure PID controller
+  pid_distance.setTarget(distance_in);
+  pid_distance.setOutputLimits(-max_output, max_output);
+  pid_distance.setIntegralLimit(3);
+  pid_distance.setTolerance(threshold, 5.0, 250);
+
+  double start_time = Brain.timer(msec);
   timer sample;
+  double left_output = 0, right_output = 0;
+  double current_distance = 0, current_angle = 0;
 
-  const bool forward = distance_in >= 0.0;
-  const double direction = forward ? 1.0 : -1.0;
-  const double targetDistance = std::fabs(distance_in);
+  // Main PID loop for driving straight (matching RW-Template logic)
+  while (((!pid_distance.isSettled() && Brain.timer(msec) - start_time <= time_limit_msec && exit) || 
+          (exit == false && current_distance < distance_in && Brain.timer(msec) - start_time <= time_limit_msec))) {
+    // Calculate current distance and heading
+    double wheel_circ = wheelCircumference();
+    current_distance = (std::fabs(((getLeftRotationDegree() - start_left) / 360.0) * wheel_circ) + 
+                        std::fabs(((getRightRotationDegree() - start_right) / 360.0) * wheel_circ)) / 2;
+    double dt = computeDt(sample);
+    left_output = pid_distance.step(current_distance, dt) * drive_direction;
+    right_output = left_output;
 
-  PID distancePid(motionGains.driveKp, motionGains.driveKi, motionGains.driveKd);
-  distancePid.setTarget(targetDistance);
-  distancePid.setOutputLimits(-max_output, max_output);
-  distancePid.setIntegralLimit(6.0);
-  distancePid.setTolerance(0.5, 5.0, 150);
-
-  PID headingPid(motionGains.headingHoldKp, motionGains.headingHoldKi, motionGains.headingHoldKd);
-  headingPid.setTarget(correct_angle);
-  headingPid.setOutputLimits(-max_output, max_output);
-  headingPid.setIntegralLimit(2.0);
-  headingPid.setTolerance(0.5, 5.0, 100);
-
-  SlewRateLimiter leftSlew(motionLimits.slewStepForward, motionLimits.slewStepReverse);
-  SlewRateLimiter rightSlew(motionLimits.slewStepForward, motionLimits.slewStepReverse);
-
-  resetChassis();
-  is_turning = true;
-
-  while (total.time(msec) <= time_limit_msec) {
-    const double dt = computeDt(sample);
-    const double leftDistance = std::fabs(motorDegreesToInches(getLeftRotationDegree()));
-    const double rightDistance = std::fabs(motorDegreesToInches(getRightRotationDegree()));
-    const double travelled = (leftDistance + rightDistance) / 2.0;
-
-    double baseVoltage = distancePid.step(travelled, dt) * direction;
-    if (!exit && travelled >= targetDistance) {
-      break;
+    // Minimum Output Check
+    if(min_speed) {
+      scaleToMin(left_output, right_output, motionLimits.minVoltage);
+    }
+    if(!exit) {
+      left_output = 24 * drive_direction;
+      right_output = 24 * drive_direction;
     }
 
-    double correction = 0.0;
-    if (trackingOptions.enableHeadingHold) {
-      headingPid.setTarget(correct_angle);
-      correction = headingPid.step(getInertialHeading(), dt);
+    // Max Output Check
+    scaleToMax(left_output, right_output, max_output);
+
+    // Max Acceleration/Deceleration Check (manual slew rate like RW-Template)
+    if(prev_left_output - left_output > max_slew_rev) {
+      left_output = prev_left_output - max_slew_rev;
     }
-
-    double leftVoltage = clamp(baseVoltage + correction, -max_output, max_output);
-    double rightVoltage = clamp(baseVoltage - correction, -max_output, max_output);
-
-    leftVoltage = leftSlew.filter(leftVoltage);
-    rightVoltage = rightSlew.filter(rightVoltage);
-
-    if (std::fabs(leftVoltage) < motionLimits.minVoltage) {
-      leftVoltage = std::copysign(motionLimits.minVoltage, leftVoltage);
+    if(prev_right_output - right_output > max_slew_rev) {
+      right_output = prev_right_output - max_slew_rev;
     }
-    if (std::fabs(rightVoltage) < motionLimits.minVoltage) {
-      rightVoltage = std::copysign(motionLimits.minVoltage, rightVoltage);
+    if(left_output - prev_left_output > max_slew_fwd) {
+      left_output = prev_left_output + max_slew_fwd;
     }
-
-    setDriveVoltage(leftVoltage, rightVoltage);
-
-    if (distancePid.isSettled() && exit) {
-      break;
+    if(right_output - prev_right_output > max_slew_fwd) {
+      right_output = prev_right_output + max_slew_fwd;
     }
-
+    prev_left_output = left_output;
+    prev_right_output = right_output;
+    driveChassis(left_output, right_output);
     wait(10, msec);
   }
-
-  if (exit) {
-    stopChassis(brakeType::hold);
+  if(exit) {
+    prev_left_output = 0;
+    prev_right_output = 0;
+    stopChassis(vex::brakeType::hold);
   }
-
-  maintainHeadingTarget(getInertialHeading());
-  is_turning = false;
+  is_turning.store(false, std::memory_order_seq_cst);
 }
 
 void curveCircle(double result_angle_deg, double center_radius, double time_limit_msec, bool exit, double max_output) {
-  if (std::fabs(center_radius) < 1e-3) {
-    turnToAngle(result_angle_deg, time_limit_msec, exit, max_output);
-    return;
+  // RW-Template implementation
+  // Store initial encoder values for both sides
+  double start_right = getRightRotationDegree(), start_left = getLeftRotationDegree();
+  double in_arc, out_arc;
+  double real_angle = 0, current_angle = 0;
+  double ratio, result_angle;
+
+  // Normalize the target angle to be within +/-180 degrees of the current heading
+  result_angle_deg = normalizeTarget(result_angle_deg);
+  result_angle = (result_angle_deg - correct_angle) * M_PI / 180.0;
+
+  // Calculate arc lengths for inner and outer wheels
+  double track_width = drivetrainDimensions.trackWidthIn;
+  in_arc = std::fabs((std::fabs(center_radius) - (track_width / 2)) * result_angle);
+  out_arc = std::fabs((std::fabs(center_radius) + (track_width / 2)) * result_angle);
+  ratio = in_arc / std::max(out_arc, 1e-6);
+
+  stopChassis(vex::brakeType::coast);
+  is_turning.store(true, std::memory_order_seq_cst);
+  double threshold = 0.5;
+
+  // Determine curve and drive direction
+  int curve_direction = center_radius > 0 ? 1 : -1;
+  int drive_direction = 0;
+  if ((curve_direction == 1 && (result_angle_deg - correct_angle) > 0) || 
+      (curve_direction == -1 && (result_angle_deg - correct_angle) < 0)) {
+    drive_direction = 1;
+  } else {
+    drive_direction = -1;
   }
 
-  timer total;
+  // Slew rate and minimum speed logic for chaining (simplified - RW-Template has dir_change variables)
+  double max_slew_fwd = drive_direction > 0 ? motionLimits.slewStepForward : motionLimits.slewStepReverse;
+  double max_slew_rev = drive_direction > 0 ? motionLimits.slewStepReverse : motionLimits.slewStepForward;
+  bool min_speed = false;
+  if(!exit) {
+    max_slew_fwd = 24;  // Large slew for smooth chaining
+    max_slew_rev = 24;
+    min_speed = true;
+  }
+
+  // Initialize PID controller for arc distance
+  PID pid_out(motionGains.driveKp, motionGains.driveKi, motionGains.driveKd);
+
+  pid_out.setTarget(out_arc);
+  pid_out.setOutputLimits(-max_output, max_output);
+  pid_out.setIntegralLimit(0);
+  pid_out.setTolerance(0.3, 0.9 * 4.5, 250);
+
+  double start_time = Brain.timer(msec);
   timer sample;
+  double left_output = 0, right_output = 0;
+  double current_right = 0, current_left = 0;
+  double wheel_circ = wheelCircumference();
 
-  const double targetHeading = normalizeTarget(result_angle_deg);
-  const double headingChange = wrapAngleDeg(targetHeading - correct_angle);
-  const double headingRad = degToRad(std::fabs(headingChange));
-  const bool turningLeft = center_radius < 0;
+  // Main control loop for each curve/exit configuration (RW-Template has 4 cases)
+  if (curve_direction == -1 && exit == true) {
+    // Left curve, stop at end
+    while (!pid_out.isSettled() && Brain.timer(msec) - start_time <= time_limit_msec) {
+      current_angle = getInertialHeading();
+      current_right = std::fabs(((getRightRotationDegree() - start_right) / 360.0) * wheel_circ);
+      double dt = computeDt(sample);
+      right_output = pid_out.step(current_right, dt) * drive_direction;
+      left_output = right_output * ratio;
 
-  const double outerRadius = std::fabs(center_radius) + drivetrainDimensions.trackWidthIn / 2.0;
-  const double innerRadius = std::max(std::fabs(center_radius) - drivetrainDimensions.trackWidthIn / 2.0, 1e-3);
+      // Enforce minimum output if chaining
+      if(min_speed) {
+        scaleToMin(left_output, right_output, motionLimits.minVoltage);
+      }
 
-  const double outerArc = headingRad * outerRadius;
-  const double innerArc = headingRad * innerRadius;
-  const double ratio = innerArc / std::max(outerArc, 1e-6);
-  const double driveDirection = headingChange >= 0 ? 1.0 : -1.0;
+      // Enforce maximum output
+      scaleToMax(left_output, right_output, max_output);
 
-  PID outerPid(motionGains.driveKp, motionGains.driveKi, motionGains.driveKd);
-  outerPid.setTarget(outerArc);
-  outerPid.setOutputLimits(-max_output, max_output);
-  outerPid.setIntegralLimit(6.0);
-  outerPid.setTolerance(0.5, 5.0, 150);
-
-  PID headingPid(motionGains.turnKp, motionGains.turnKi, motionGains.turnKd);
-  headingPid.setTarget(targetHeading);
-  headingPid.setOutputLimits(-max_output, max_output);
-  headingPid.setIntegralLimit(2.0);
-  headingPid.setTolerance(1.0, 5.0, 150);
-
-  resetChassis();
-  is_turning = true;
-
-  while (total.time(msec) <= time_limit_msec) {
-    const double dt = computeDt(sample);
-    const double leftDistance = std::fabs(motorDegreesToInches(getLeftRotationDegree()));
-    const double rightDistance = std::fabs(motorDegreesToInches(getRightRotationDegree()));
-
-    const double outerTravel = turningLeft ? rightDistance : leftDistance;
-
-    double outerCommand = outerPid.step(outerTravel, dt) * driveDirection;
-    double innerCommand = outerCommand * ratio;
-    double headingCorrection = headingPid.step(getInertialHeading(), dt);
-
-    double leftVoltage = turningLeft ? innerCommand : outerCommand;
-    double rightVoltage = turningLeft ? outerCommand : innerCommand;
-
-    leftVoltage += headingCorrection;
-    rightVoltage -= headingCorrection;
-
-    if (std::fabs(leftVoltage) < motionLimits.minVoltage) {
-      leftVoltage = std::copysign(motionLimits.minVoltage, leftVoltage);
+      driveChassis(left_output, right_output);
+      wait(10, msec);
     }
-    if (std::fabs(rightVoltage) < motionLimits.minVoltage) {
-      rightVoltage = std::copysign(motionLimits.minVoltage, rightVoltage);
+  } else if (curve_direction == 1 && exit == true) {
+    // Right curve, stop at end
+    while (!pid_out.isSettled() && Brain.timer(msec) - start_time <= time_limit_msec) {
+      current_left = std::fabs(((getLeftRotationDegree() - start_left) / 360.0) * wheel_circ);
+      double dt = computeDt(sample);
+      left_output = pid_out.step(current_left, dt) * drive_direction;
+      right_output = left_output * ratio;
+
+      if(min_speed) {
+        scaleToMin(left_output, right_output, motionLimits.minVoltage);
+      }
+
+      scaleToMax(left_output, right_output, max_output);
+
+      driveChassis(left_output, right_output);
+      wait(10, msec);
     }
+  } else if (curve_direction == -1 && exit == false) {
+    // Left curve, chaining (do not stop at end)
+    while (current_right < out_arc && Brain.timer(msec) - start_time <= time_limit_msec) {
+      current_angle = getInertialHeading();
+      current_right = std::fabs(((getRightRotationDegree() - start_right) / 360.0) * wheel_circ);
+      double dt = computeDt(sample);
+      right_output = pid_out.step(current_right, dt) * drive_direction;
+      left_output = right_output * ratio;
 
-    setDriveVoltage(leftVoltage, rightVoltage);
+      if(min_speed) {
+        scaleToMin(left_output, right_output, motionLimits.minVoltage);
+      }
 
-    if (outerPid.isSettled() && exit) {
-      break;
+      scaleToMax(left_output, right_output, max_output);
+
+      driveChassis(left_output, right_output);
+      wait(10, msec);
     }
+  } else {
+    // Right curve, chaining (do not stop at end)
+    while (current_left < out_arc && Brain.timer(msec) - start_time <= time_limit_msec) {
+      current_angle = getInertialHeading();
+      current_left = std::fabs(((getLeftRotationDegree() - start_left) / 360.0) * wheel_circ);
+      double dt = computeDt(sample);
+      left_output = pid_out.step(current_left, dt) * drive_direction;
+      right_output = left_output * ratio;
 
-    wait(10, msec);
+      if(min_speed) {
+        scaleToMin(left_output, right_output, motionLimits.minVoltage);
+      }
+
+      scaleToMax(left_output, right_output, max_output);
+
+      driveChassis(left_output, right_output);
+      wait(10, msec);
+    }
   }
-
-  if (exit) {
-    stopChassis(brakeType::hold);
+  // Stop the chassis if required
+  if(exit == true) {
+    stopChassis(vex::brakeType::hold);
   }
-
-  maintainHeadingTarget(targetHeading);
-  is_turning = false;
+  // Update the global heading
+  correct_angle = result_angle_deg;
+  is_turning.store(false, std::memory_order_seq_cst);
 }
 
 void swing(double swing_angle, double drive_direction, double time_limit_msec, bool exit, double max_output) {
-  timer total;
+  // RW-Template implementation
+  stopChassis(vex::brakeType::coast);
+  is_turning.store(true, std::memory_order_seq_cst);
+  double threshold = 1;
+  PID pid(motionGains.turnKp, motionGains.turnKi, motionGains.turnKd);
+
+  swing_angle = normalizeTarget(swing_angle);
+  pid.setTarget(swing_angle);
+  pid.setOutputLimits(-max_output, max_output);
+  pid.setIntegralLimit(0);  // setIntegralMax(0) in RW-Template
+  pid.setTolerance(threshold, threshold * 4.5, 250);  // Combined tolerance setup
+
+  // Draw the baseline for visualization
+  double draw_amplifier = 230 / std::fabs(swing_angle);
+  Brain.Screen.clearScreen(black);
+  Brain.Screen.setPenColor(green);
+  Brain.Screen.drawLine(0, std::fabs(swing_angle) * draw_amplifier, 600, std::fabs(swing_angle) * draw_amplifier);
+  Brain.Screen.setPenColor(red);
+
+  // Start the PID loop
+  double start_time = Brain.timer(msec);
   timer sample;
+  double output;
+  double current_heading = correct_angle;
+  double previous_heading = 0;
+  int index = 1;
+  int choice = 1;
 
-  const double targetHeading = normalizeTarget(swing_angle);
-  const double delta = wrapAngleDeg(targetHeading - correct_angle);
-  const bool turningRight = delta > 0.0;
-  const bool forward = drive_direction >= 0.0;
+  // Determine which side to swing and direction
+  if(swing_angle - correct_angle < 0 && drive_direction == 1) {
+    choice = 1;
+  } else if(swing_angle - correct_angle > 0 && drive_direction == 1) {
+    choice = 2;
+  } else if(swing_angle - correct_angle < 0 && drive_direction == -1) {
+    choice = 3;
+  } else {
+    choice = 4;
+  }
 
-  const bool holdRight = (turningRight && forward) || (!turningRight && !forward);
+  // Swing logic for each case, chaining (exit == false)
+  if(choice == 1 && exit == false) {
+    // Swing left, forward
+    while (current_heading > swing_angle && Brain.timer(msec) - start_time <= time_limit_msec) {
+      current_heading = getInertialHeading();
+      double dt = computeDt(sample);
+      output = pid.step(current_heading, dt);
 
-  PID swingPid(motionGains.turnKp, motionGains.turnKi, motionGains.turnKd);
-  swingPid.setTarget(targetHeading);
-  swingPid.setOutputLimits(-max_output, max_output);
-  swingPid.setIntegralLimit(2.0);
-  swingPid.setTolerance(1.0, 5.0, 150);
+      // Draw heading trace
+      Brain.Screen.drawLine(
+          index * 3, std::fabs(previous_heading) * draw_amplifier, 
+          (index + 1) * 3, std::fabs(current_heading * draw_amplifier));
+      index++;
+      previous_heading = current_heading;
 
-  is_turning = true;
+      // Clamp output
+      if(output < motionLimits.minVoltage) output = motionLimits.minVoltage;
+      if(output > max_output) output = max_output;
+      else if(output < -max_output) output = -max_output;
 
-  while (total.time(msec) <= time_limit_msec && !swingPid.isSettled()) {
-    const double dt = computeDt(sample);
-    double output = swingPid.step(getInertialHeading(), dt);
-
-    if (std::fabs(output) < motionLimits.minVoltage) {
-      output = std::copysign(motionLimits.minVoltage, output);
+      left_chassis.stop(vex::brakeType::hold);
+      right_chassis.spin(vex::directionType::fwd, output * drive_direction, vex::voltageUnits::volt);
+      wait(10, msec);
     }
+  } else if(choice == 2 && exit == false) {
+    // Swing right, forward
+    while (current_heading < swing_angle && Brain.timer(msec) - start_time <= time_limit_msec) {
+      current_heading = getInertialHeading();
+      double dt = computeDt(sample);
+      output = pid.step(current_heading, dt);
 
-    if (holdRight) {
-      right_chassis.stop(brakeType::hold);
-      left_chassis.spin(fwd, output * (forward ? 1.0 : -1.0), voltageUnits::volt);
-    } else {
-      left_chassis.stop(brakeType::hold);
-      right_chassis.spin(fwd, -output * (forward ? 1.0 : -1.0), voltageUnits::volt);
+      // Draw heading trace
+      Brain.Screen.drawLine(
+          index * 3, std::fabs(previous_heading) * draw_amplifier, 
+          (index + 1) * 3, std::fabs(current_heading * draw_amplifier));
+      index++;
+      previous_heading = current_heading;
+
+      // Clamp output
+      if(output < motionLimits.minVoltage) output = motionLimits.minVoltage;
+      if(output > max_output) output = max_output;
+      else if(output < -max_output) output = -max_output;
+
+      left_chassis.spin(vex::directionType::fwd, output * drive_direction, vex::voltageUnits::volt);
+      right_chassis.stop(vex::brakeType::hold);
+      wait(10, msec);
     }
+  } else if(choice == 3 && exit == false) {
+    // Swing left, backward
+    while (current_heading > swing_angle && Brain.timer(msec) - start_time <= time_limit_msec) {
+      current_heading = getInertialHeading();
+      double dt = computeDt(sample);
+      output = pid.step(current_heading, dt);
 
+      // Draw heading trace
+      Brain.Screen.drawLine(
+          index * 3, std::fabs(previous_heading) * draw_amplifier, 
+          (index + 1) * 3, std::fabs(current_heading * draw_amplifier));
+      index++;
+      previous_heading = current_heading;
+
+      // Clamp output
+      if(output < motionLimits.minVoltage) output = motionLimits.minVoltage;
+      if(output > max_output) output = max_output;
+      else if(output < -max_output) output = -max_output;
+
+      left_chassis.spin(vex::directionType::fwd, output * drive_direction, vex::voltageUnits::volt);
+      right_chassis.stop(vex::brakeType::hold);
+      wait(10, msec);
+    }
+  } else if(choice == 4 && exit == false) {
+    // Swing right, backward
+    while (current_heading < swing_angle && Brain.timer(msec) - start_time <= time_limit_msec && exit == false) {
+      current_heading = getInertialHeading();
+      double dt = computeDt(sample);
+      output = pid.step(current_heading, dt);
+
+      // Draw heading trace
+      Brain.Screen.drawLine(
+          index * 3, std::fabs(previous_heading) * draw_amplifier, 
+          (index + 1) * 3, std::fabs(current_heading * draw_amplifier));
+      index++;
+      previous_heading = current_heading;
+
+      // Clamp output
+      if(output < motionLimits.minVoltage) output = motionLimits.minVoltage;
+      if(output > max_output) output = max_output;
+      else if(output < -max_output) output = -max_output;
+
+      left_chassis.stop(vex::brakeType::hold);
+      right_chassis.spin(vex::directionType::fwd, output * drive_direction, vex::voltageUnits::volt);
+      wait(10, msec);
+    }
+  }
+
+  // PID loop for exit == true (stop at end)
+  while (!pid.isSettled() && Brain.timer(msec) - start_time <= time_limit_msec && exit == true) {
+    current_heading = getInertialHeading();
+    double dt = computeDt(sample);
+    output = pid.step(current_heading, dt);
+
+    // Draw heading trace
+    Brain.Screen.drawLine(
+        index * 3, std::fabs(previous_heading) * draw_amplifier, 
+        (index + 1) * 3, std::fabs(current_heading * draw_amplifier));
+    index++;
+    previous_heading = current_heading;
+
+    // Clamp output
+    if(output > max_output) output = max_output;
+    else if(output < -max_output) output = -max_output;
+
+    // Apply output to correct side based on swing direction
+    switch(choice) {
+    case 1:
+      left_chassis.stop(hold);
+      right_chassis.spin(fwd, -output * drive_direction, volt);
+      break;
+    case 2:
+      left_chassis.spin(vex::directionType::fwd, output * drive_direction, vex::voltageUnits::volt);
+      right_chassis.stop(vex::brakeType::hold);
+      break;
+    case 3:
+      left_chassis.spin(vex::directionType::fwd, -output * drive_direction, vex::voltageUnits::volt);
+      right_chassis.stop(vex::brakeType::hold);
+      break;
+    case 4:
+      left_chassis.stop(vex::brakeType::hold);
+      right_chassis.spin(vex::directionType::fwd, output * drive_direction, vex::voltageUnits::volt);
+      break;
+    }
     wait(10, msec);
   }
-
-  if (exit) {
-    stopChassis(brakeType::hold);
+  if(exit == true) {
+    stopChassis(vex::brakeType::hold);
   }
-
-  maintainHeadingTarget(targetHeading);
-  is_turning = false;
-}
-
-void correctHeading() {
-  PID holdPid(motionGains.headingHoldKp, motionGains.headingHoldKi, motionGains.headingHoldKd);
-  holdPid.setOutputLimits(-motionLimits.maxVoltage, motionLimits.maxVoltage);
-  holdPid.setIntegralLimit(2.0);
-  holdPid.setTolerance(0.5, 5.0, 200);
-
-  timer sample;
-
-  while (true) {
-    if (headingCorrectionEnabled.load() && !is_turning) {
-      holdPid.setTarget(correct_angle);
-      const double dt = computeDt(sample);
-      double correction = holdPid.step(getInertialHeading(), dt);
-
-      if (std::fabs(correction) < motionLimits.minVoltage ||
-          std::fabs(holdPid.error()) < 0.5) {
-        correction = 0.0;
-      }
-
-      setDriveVoltage(correction, -correction);
-    } else {
-      holdPid.resetIntegral();
-      sample.reset();
-    }
-
-    wait(20, msec);
-  }
+  correct_angle = swing_angle;
+  is_turning.store(false, std::memory_order_seq_cst);
 }
 
 void trackNoOdomWheel() {
@@ -560,169 +821,274 @@ void trackYOdomWheel() {
   }
 }
 
-void turnToPoint(double x, double y, int dir, double time_limit_msec) {
-  const double angle = radToDeg(std::atan2(x - xpos, y - ypos));
-  const double target = dir >= 0 ? angle : wrapAngleDeg(angle + 180.0);
-  turnToAngle(target, time_limit_msec, true, motionLimits.maxVoltage);
+void turnToPoint(double x, double y, int direction, double time_limit_msec) {
+  // RW-Template implementation
+  stopChassis(vex::brakeType::coast);
+  is_turning.store(true, std::memory_order_seq_cst);
+  double threshold = 1, add = 0;
+  if(direction == -1) {
+    add = 180; // Add 180 degrees if turning to face backward
+  }
+  // Calculate target angle using atan2 and normalize
+  double turn_angle = normalizeTarget(radToDeg(std::atan2(x - xpos, y - ypos))) + add;
+  PID pid(motionGains.turnKp, motionGains.turnKi, motionGains.turnKd);
+
+  pid.setTarget(turn_angle);
+  pid.setOutputLimits(-motionLimits.maxVoltage, motionLimits.maxVoltage);
+  pid.setIntegralLimit(0);  // setIntegralMax(0) in RW-Template
+  pid.setTolerance(threshold, threshold * 4.5, 500);  // Combined tolerance setup
+
+  // Draw the baseline for visualization
+  double draw_amplifier = 230 / std::fabs(turn_angle);
+  Brain.Screen.clearScreen(black);
+  Brain.Screen.setPenColor(green);
+  Brain.Screen.drawLine(0, std::fabs(turn_angle) * draw_amplifier, 
+                        600, std::fabs(turn_angle) * draw_amplifier);
+  Brain.Screen.setPenColor(red);
+
+  // Start the PID loop
+  double start_time = Brain.timer(msec);
+  timer sample;
+  double output;
+  double current_heading;
+  double previous_heading = 0;
+  int index = 1;
+  while (!pid.isSettled() && Brain.timer(msec) - start_time <= time_limit_msec) {
+    // Continuously update target as robot moves
+    pid.setTarget(normalizeTarget(radToDeg(std::atan2(x - xpos, y - ypos))) + add);
+    current_heading = getInertialHeading();
+    double dt = computeDt(sample);
+    output = pid.step(current_heading, dt);
+
+    // Draw heading trace
+    Brain.Screen.drawLine(
+        index * 3, std::fabs(previous_heading) * draw_amplifier, 
+        (index + 1) * 3, std::fabs(current_heading * draw_amplifier));
+    index++;
+    previous_heading = current_heading;
+
+    driveChassis(output, -output);
+    wait(10, msec);
+  }  
+  stopChassis(vex::hold);
+  correct_angle = getInertialHeading();
+  is_turning.store(false, std::memory_order_seq_cst);
 }
 
 void moveToPoint(double x, double y, int dir, double time_limit_msec, bool exit, double max_output, bool overturn) {
-  timer total;
+  // RW-Template implementation
+  stopChassis(vex::brakeType::coast);
+  is_turning.store(true, std::memory_order_seq_cst);
+  double threshold = 0.5;
+  int add = dir > 0 ? 0 : 180;
+  double max_slew_fwd = dir > 0 ? motionLimits.slewStepForward : motionLimits.slewStepReverse;
+  double max_slew_rev = dir > 0 ? motionLimits.slewStepReverse : motionLimits.slewStepForward;
+  bool min_speed = false;
+  
+  // Simplified chaining logic (RW-Template has dir_change variables we don't have)
+  if(!exit) {
+    max_slew_fwd = 24;
+    max_slew_rev = 24;
+    min_speed = true;
+  }
+
+  PID pid_distance(motionGains.driveKp, motionGains.driveKi, motionGains.driveKd);
+
+  // Set PID target for distance
+  pid_distance.setTarget(std::hypot(x - xpos, y - ypos));
+  pid_distance.setOutputLimits(-max_output, max_output);
+  pid_distance.setIntegralLimit(0);
+  pid_distance.setTolerance(threshold, 5.0, 250);
+
+  double start_time = Brain.timer(msec);
   timer sample;
+  double left_output = 0, right_output = 0;
+  double exittolerance = 1;
+  bool perpendicular_line = false, prev_perpendicular_line = true;
 
-  PID distancePid(motionGains.driveKp, motionGains.driveKi, motionGains.driveKd);
-  distancePid.setTarget(0.0);
-  distancePid.setOutputLimits(-max_output, max_output);
-  distancePid.setIntegralLimit(6.0);
-  distancePid.setTolerance(0.75, 5.0, 150);
+  double current_angle = 0, overturn_value = 0;
+  bool ch = true;
 
-  PID headingPid(motionGains.turnKp, motionGains.turnKi, motionGains.turnKd);
-  headingPid.setOutputLimits(-max_output, max_output);
-  headingPid.setIntegralLimit(2.0);
-  headingPid.setTolerance(2.0, 6.0, 150);
-
-  SlewRateLimiter leftSlew(motionLimits.slewStepForward, motionLimits.slewStepReverse);
-  SlewRateLimiter rightSlew(motionLimits.slewStepForward, motionLimits.slewStepReverse);
-
-  is_turning = true;
-
-  while (total.time(msec) <= time_limit_msec) {
-    const double dt = computeDt(sample);
-    const double dx = x - xpos;
-    const double dy = y - ypos;
-    const double distance = std::hypot(dx, dy);
-
-    if (distance < 0.75 && exit) {
+  // Main PID loop for moving to point (matching RW-Template logic)
+  while (Brain.timer(msec) - start_time <= time_limit_msec) {
+    // Continuously update targets as robot moves
+    double current_distance = std::hypot(x - xpos, y - ypos);
+    double target_heading_angle = radToDeg(std::atan2(x - xpos, y - ypos));
+    pid_distance.setTarget(current_distance);
+    current_angle = getInertialHeading();
+    
+    // Calculate drive output based on heading and distance (adapting RW-Template logic)
+    double dt = computeDt(sample);
+    // RW-Template uses update(0) which uses error = target - 0, so we pass 0 as measurement
+    // Our PID uses step(measurement, dt) where error = target - measurement
+    // To match RW-Template's update(0), we pass 0 as measurement
+    double distance_output = pid_distance.step(0, dt);
+    double angle_to_target = target_heading_angle + add - current_angle;
+    left_output = distance_output * std::cos(degToRad(angle_to_target)) * dir;
+    right_output = left_output;
+    
+    // Check if robot has crossed the perpendicular line to the target
+    double normalized_angle = normalizeTarget(current_angle + add);
+    perpendicular_line = ((ypos - y) * -std::cos(degToRad(normalized_angle)) <= 
+                          (xpos - x) * std::sin(degToRad(normalized_angle)) + exittolerance);
+    if(perpendicular_line && !prev_perpendicular_line) {
       break;
     }
+    prev_perpendicular_line = perpendicular_line;
 
-    const double desiredHeading = wrapAngleDeg(radToDeg(std::atan2(dx, dy)) + (dir >= 0 ? 0.0 : 180.0));
-    headingPid.setTarget(desiredHeading);
-
-    const double rawOutput = distancePid.step(distance, dt);
-    const double directionSign = dir >= 0 ? 1.0 : -1.0;
-    const double translational = -rawOutput * directionSign;
-    const double correction = headingPid.step(getInertialHeading(), dt);
-
-    double leftVoltage = translational + correction;
-    double rightVoltage = translational - correction;
-
-    if (overturn) {
-      const double excess = std::fabs(leftVoltage) - max_output;
-      if (excess > 0) leftVoltage -= excess * std::copysign(1.0, leftVoltage);
-      const double excessRight = std::fabs(rightVoltage) - max_output;
-      if (excessRight > 0) rightVoltage -= excessRight * std::copysign(1.0, rightVoltage);
+    // Minimum Output Check
+    if(min_speed) {
+      scaleToMin(left_output, right_output, motionLimits.minVoltage);
     }
 
-    leftVoltage = leftSlew.filter(clamp(leftVoltage, -max_output, max_output));
-    rightVoltage = rightSlew.filter(clamp(rightVoltage, -max_output, max_output));
+    right_output = left_output;
 
-    if (std::fabs(leftVoltage) < motionLimits.minVoltage) {
-      leftVoltage = std::copysign(motionLimits.minVoltage, leftVoltage);
+    // Max Output Check
+    scaleToMax(left_output, right_output, max_output);
+
+    // Max Acceleration/Deceleration Check (manual slew rate like RW-Template)
+    if(prev_left_output - left_output > max_slew_rev) {
+      left_output = prev_left_output - max_slew_rev;
     }
-    if (std::fabs(rightVoltage) < motionLimits.minVoltage) {
-      rightVoltage = std::copysign(motionLimits.minVoltage, rightVoltage);
+    if(prev_right_output - right_output > max_slew_rev) {
+      right_output = prev_right_output - max_slew_rev;
     }
-
-    setDriveVoltage(leftVoltage, rightVoltage);
-
-    if (!exit && distance < 1.0) {
-      break;
+    if(left_output - prev_left_output > max_slew_fwd) {
+      left_output = prev_left_output + max_slew_fwd;
     }
-
+    if(right_output - prev_right_output > max_slew_fwd) {
+      right_output = prev_right_output + max_slew_fwd;
+    }
+    prev_left_output = left_output;
+    prev_right_output = right_output;
+    driveChassis(left_output, right_output);
     wait(10, msec);
   }
-
-  if (exit) {
-    stopChassis(brakeType::hold);
+  if(exit == true) {
+    prev_left_output = 0;
+    prev_right_output = 0;
+    stopChassis(vex::brakeType::hold);
   }
-
-  maintainHeadingTarget(getInertialHeading());
-  is_turning = false;
+  correct_angle = getInertialHeading();
+  is_turning.store(false, std::memory_order_seq_cst);
 }
 
 void boomerang(double x, double y, int dir, double a, double dlead, double time_limit_msec, bool exit, double max_output, bool overturn) {
-  timer total;
+  // RW-Template implementation
+  stopChassis(vex::brakeType::coast);
+  is_turning.store(true, std::memory_order_seq_cst);
+  double threshold = 0.5;
+  int add = dir > 0 ? 0 : 180;
+  double max_slew_fwd = dir > 0 ? motionLimits.slewStepForward : motionLimits.slewStepReverse;
+  double max_slew_rev = dir > 0 ? motionLimits.slewStepReverse : motionLimits.slewStepForward;
+  bool min_speed = false;
+  
+  // Simplified chaining logic (RW-Template has dir_change variables we don't have)
+  if(!exit) {
+    max_slew_fwd = 24;
+    max_slew_rev = 24;
+    min_speed = true;
+  }
+
+  PID pid_distance(motionGains.driveKp, motionGains.driveKi, motionGains.driveKd);
+
+  pid_distance.setTarget(0); // Target is dynamically updated
+  pid_distance.setOutputLimits(-max_output, max_output);
+  pid_distance.setIntegralLimit(3);
+  pid_distance.setTolerance(threshold, 5.0, 250);
+
+  double start_time = Brain.timer(msec);
   timer sample;
+  double left_output = 0, right_output = 0, slip_speed = 0, overturn_value = 0;
+  double exit_tolerance = 3;
+  bool perpendicular_line = false, prev_perpendicular_line = true;
+  double current_angle = 0, hypotenuse = 0, carrot_x = 0, carrot_y = 0;
 
-  const double clampedLead = clamp(dlead, 0.0, 1.0);
-  const double finalHeading = normalizeTarget(a);
-
-  PID distancePid(motionGains.driveKp, motionGains.driveKi, motionGains.driveKd);
-  distancePid.setTarget(0.0);
-  distancePid.setOutputLimits(-max_output, max_output);
-  distancePid.setIntegralLimit(6.0);
-  distancePid.setTolerance(0.5, 5.0, 150);
-
-  PID headingPid(motionGains.turnKp, motionGains.turnKi, motionGains.turnKd);
-  headingPid.setOutputLimits(-max_output, max_output);
-  headingPid.setIntegralLimit(2.0);
-  headingPid.setTolerance(2.0, 6.0, 150);
-
-  is_turning = true;
-
-  while (total.time(msec) <= time_limit_msec) {
-    const double dt = computeDt(sample);
-    const double dx = x - xpos;
-    const double dy = y - ypos;
-    const double distance = std::hypot(dx, dy);
-
-    if (distance < 0.75 && exit) {
+  // Main PID loop for boomerang path (matching RW-Template logic)
+  while (!pid_distance.isSettled() && Brain.timer(msec) - start_time <= time_limit_msec) {
+    hypotenuse = std::hypot(xpos - x, ypos - y); // Distance to target
+    // Calculate carrot point for path leading
+    carrot_x = x - hypotenuse * std::sin(degToRad(a + add)) * dlead;
+    carrot_y = y - hypotenuse * std::cos(degToRad(a + add)) * dlead;
+    double carrot_distance = std::hypot(carrot_x - xpos, carrot_y - ypos);
+    pid_distance.setTarget(carrot_distance * dir);
+    current_angle = getInertialHeading();
+    
+    // Calculate drive output based on carrot point (adapting RW-Template logic)
+    double dt = computeDt(sample);
+    // RW-Template uses update(0) which uses error = target - 0, so we pass 0 as measurement
+    // Our PID uses step(measurement, dt) where error = target - measurement
+    // To match RW-Template's update(0), we pass 0 as measurement
+    double distance_output = pid_distance.step(0, dt);
+    double carrot_angle = radToDeg(std::atan2(carrot_x - xpos, carrot_y - ypos));
+    double angle_to_carrot = carrot_angle + add - current_angle;
+    left_output = distance_output * std::cos(degToRad(angle_to_carrot));
+    right_output = left_output;
+    
+    // Check if robot has crossed the perpendicular line to the target
+    double normalized_a = normalizeTarget(a);
+    perpendicular_line = ((ypos - y) * -std::cos(degToRad(normalized_a)) <= 
+                          (xpos - x) * std::sin(degToRad(normalized_a)) + exit_tolerance);
+    if(perpendicular_line && !prev_perpendicular_line) {
       break;
     }
+    prev_perpendicular_line = perpendicular_line;
 
-    const double carrotDistance = distance * clampedLead;
-    const double leadHeading = degToRad(finalHeading);
-    const double carrotX = x - carrotDistance * std::sin(leadHeading);
-    const double carrotY = y - carrotDistance * std::cos(leadHeading);
-
-    const double carrotDx = carrotX - xpos;
-    const double carrotDy = carrotY - ypos;
-    const double carrotDist = std::hypot(carrotDx, carrotDy);
-
-    const double desiredHeading = wrapAngleDeg(radToDeg(std::atan2(carrotDx, carrotDy)) + (dir >= 0 ? 0.0 : 180.0));
-    headingPid.setTarget(desiredHeading);
-
-    const double rawOutput = distancePid.step(carrotDist, dt);
-    const double directionSign = dir >= 0 ? 1.0 : -1.0;
-    const double translational = -rawOutput * directionSign;
-    const double correction = headingPid.step(getInertialHeading(), dt);
-
-    double leftVoltage = translational + correction;
-    double rightVoltage = translational - correction;
-
-    if (overturn) {
-      const double excessL = std::fabs(leftVoltage) - max_output;
-      if (excessL > 0) leftVoltage -= excessL * std::copysign(1.0, leftVoltage);
-      const double excessR = std::fabs(rightVoltage) - max_output;
-      if (excessR > 0) rightVoltage -= excessR * std::copysign(1.0, rightVoltage);
+    // Minimum Output Check
+    if(min_speed) {
+      scaleToMin(left_output, right_output, motionLimits.minVoltage);
     }
 
-    leftVoltage = clamp(leftVoltage, -max_output, max_output);
-    rightVoltage = clamp(rightVoltage, -max_output, max_output);
-
-    if (std::fabs(leftVoltage) < motionLimits.minVoltage) {
-      leftVoltage = std::copysign(motionLimits.minVoltage, leftVoltage);
-    }
-    if (std::fabs(rightVoltage) < motionLimits.minVoltage) {
-      rightVoltage = std::copysign(motionLimits.minVoltage, rightVoltage);
-    }
-
-    setDriveVoltage(leftVoltage, rightVoltage);
-
-    if (!exit && carrotDist < 1.0) {
-      break;
+    // Limit slip speed for smoother curves (simplified - RW-Template uses chase_power)
+    // RW-Template: slip_speed = sqrt(chase_power * getRadius(x_pos, y_pos, carrot_x, carrot_y, current_angle) * 9.8);
+    double radius = getRadius(xpos, ypos, carrot_x, carrot_y, current_angle);
+    slip_speed = std::sqrt(0.8 * std::fabs(radius) * 9.8);  // Simplified chase_power to 0.8
+    if(left_output > slip_speed) {
+      left_output = slip_speed;
+    } else if(left_output < -slip_speed) {
+      left_output = -slip_speed;
     }
 
+    // Overturn logic for sharp turns
+    overturn_value = std::fabs(left_output) - max_output;
+    if(overturn_value > 0 && overturn) {
+      if(left_output > 0) {
+        left_output -= overturn_value;
+      }
+      else {
+        left_output += overturn_value;
+      }
+    }
+    right_output = left_output;
+
+    // Max Output Check
+    scaleToMax(left_output, right_output, max_output);
+
+    // Max Acceleration/Deceleration Check (manual slew rate like RW-Template)
+    if(prev_left_output - left_output > max_slew_rev) {
+      left_output = prev_left_output - max_slew_rev;
+    }
+    if(prev_right_output - right_output > max_slew_rev) {
+      right_output = prev_right_output - max_slew_rev;
+    }
+    if(left_output - prev_left_output > max_slew_fwd) {
+      left_output = prev_left_output + max_slew_fwd;
+    }
+    if(right_output - prev_right_output > max_slew_fwd) {
+      right_output = prev_right_output + max_slew_fwd;
+    }
+    prev_left_output = left_output;
+    prev_right_output = right_output;
+    driveChassis(left_output, right_output);
     wait(10, msec);
   }
-
-  if (exit) {
-    stopChassis(brakeType::hold);
+  if(exit) {
+    prev_left_output = 0;
+    prev_right_output = 0;
+    stopChassis(vex::brakeType::hold);
   }
-
-  maintainHeadingTarget(finalHeading);
-  is_turning = false;
+  correct_angle = a;
+  is_turning.store(false, std::memory_order_seq_cst);
 }
 
 void getPose(double& x, double& y, double& heading_out) {

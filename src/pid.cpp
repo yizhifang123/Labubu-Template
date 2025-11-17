@@ -57,12 +57,17 @@ double PID::step(double measurement, double dtSeconds) {
     m_integral = std::copysign(m_integralLimit, m_integral);
   }
 
+  // RW-Template calculates derivative WITHOUT dividing by dt
+  // derivative = kd * (current_error - previous_error)
+  // This matches RW-Template's implementation exactly
   if (dtSeconds > 1e-6) {
-    m_derivative = (m_error - m_prevError) / dtSeconds;
+    m_derivative = m_error - m_prevError;
   } else {
     m_derivative = 0.0;
   }
 
+  // RW-Template: output = proportional + integral + derivative
+  // where derivative = kd * (current_error - previous_error)
   m_output = m_kp * m_error + m_ki * m_integral + m_kd * m_derivative;
   m_output = clamp(m_output, m_minOutput, m_maxOutput);
 

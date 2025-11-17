@@ -31,9 +31,9 @@ extern vex::rotation VerticalTracker;
  * about distances.  All units are inches and represent physical measurements.
  */
 struct DrivetrainDimensions {
-  double wheelDiameterIn = 4.0;      ///< Wheel diameter in inches
-  double gearRatio = 1.0;            ///< Motor rotations : wheel rotations
-  double trackWidthIn = 11.0;        ///< Distance between left/right wheels
+  double wheelDiameterIn = 2.75;      ///< Wheel diameter in inches
+  double gearRatio = 0.75;            ///< Motor rotations : wheel rotations
+  double trackWidthIn = 15.0;        ///< Distance between left/right wheels
   double horizontalTrackerDiameterIn = 2.75;
   double verticalTrackerDiameterIn = 2.75;
   double horizontalTrackerOffsetIn = 0.0; ///< + is to the left of robot center
@@ -60,17 +60,17 @@ extern MotionLimits motionLimits;
  * turning, driving, and heading corrections, so we expose the values here.
  */
 struct MotionGains {
-  double driveKp = 0.12;
-  double driveKi = 0.0;
-  double driveKd = 0.005;
+  double driveKp = 8.0;  // Reduced from 1.1 to reduce overshoot and oscillation
+  double driveKi = 0.05;  // Reduced from 0.1 to prevent integral windup
+  double driveKd = 2.0;  // Reduced from 7 to reduce jitter
 
-  double turnKp = 0.45;
-  double turnKi = 0.0;
-  double turnKd = 0.36;
+  double turnKp = 3.0;
+  double turnKi = 0.05;
+  double turnKd = 1.0;  // Reduced from 2.5 to reduce jitter
 
-  double headingHoldKp = 0.16;
+  double headingHoldKp = 0.6;
   double headingHoldKi = 0.0;
-  double headingHoldKd = 0.002;
+  double headingHoldKd = 4.0;
 };
 
 extern MotionGains motionGains;
@@ -83,7 +83,7 @@ extern MotionGains motionGains;
 struct TrackingOptions {
   bool useHorizontalTracker = false;
   bool useVerticalTracker = false;
-  bool enableHeadingHold = true;
+  bool enableHeadingHold = false;
 };
 
 extern TrackingOptions trackingOptions;

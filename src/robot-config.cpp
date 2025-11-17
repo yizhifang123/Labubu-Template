@@ -10,22 +10,22 @@ using namespace vex;
 brain Brain;
 controller Controller1 = controller(primary);
 
-motor left_chassis1 = motor(PORT5, gearSetting::ratio6_1, true);
-motor left_chassis2 = motor(PORT6, gearSetting::ratio6_1, true);
-motor left_chassis3 = motor(PORT7, gearSetting::ratio6_1, false);
+motor left_chassis1 = motor(PORT20, gearSetting::ratio6_1, true);
+motor left_chassis2 = motor(PORT8, gearSetting::ratio6_1, true);
+motor left_chassis3 = motor(PORT10, gearSetting::ratio6_1, true);
 motor_group left_chassis(left_chassis1, left_chassis2, left_chassis3);
 
-motor right_chassis1 = motor(PORT3, gearSetting::ratio6_1, false);
-motor right_chassis2 = motor(PORT4, gearSetting::ratio6_1, false);
-motor right_chassis3 = motor(PORT11, gearSetting::ratio6_1, true);
+motor right_chassis1 = motor(PORT14, gearSetting::ratio6_1, false);
+motor right_chassis2 = motor(PORT3, gearSetting::ratio6_1, false);
+motor right_chassis3 = motor(PORT5, gearSetting::ratio6_1, false);
 motor_group right_chassis(right_chassis1, right_chassis2, right_chassis3);
 
 motor* leftEncoderMotor = &left_chassis1;
 motor* rightEncoderMotor = &right_chassis1;
 
-inertial InertialSensor = inertial(PORT11);
-rotation HorizontalTracker = rotation(PORT3, false);
-rotation VerticalTracker   = rotation(PORT4, false);
+inertial InertialSensor = inertial(PORT15);
+rotation HorizontalTracker = rotation(PORT6, false);
+rotation VerticalTracker   = rotation(PORT6, false);
 
 // ---------------------------------------------------------------------------//
 // Tunable Parameters                                                         //
@@ -75,8 +75,8 @@ void configureDevices() {
   HorizontalTracker.resetPosition();
   VerticalTracker.resetPosition();
 
-  // Default options: heading hold enabled, odom sensors off until configured.
-  trackingOptions.enableHeadingHold = true;
+  // Default options: heading hold disabled, odom sensors off until configured.
+  trackingOptions.enableHeadingHold = false;
   trackingOptions.useHorizontalTracker = false;
   trackingOptions.useVerticalTracker = false;
 
